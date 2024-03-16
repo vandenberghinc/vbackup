@@ -1,0 +1,28 @@
+{
+	"name": "@vandenberghinc/vbackup",
+	"version": "1.1.1",
+	"description": "Create a backup-server with ease.",
+	"main": "vbackup.js",
+	"keywords": [
+		"vandenberghinc",
+		"backup-server",
+		"backup",
+		"server"
+	],
+	"bin": {
+		"libris": "./cli.js"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"author": "Libris",
+	"dependencies": {
+		"bson": "^6.5.0",
+		"diskusage": "^1.2.0",
+		"fs-extra": "^11.2.0",
+		"https": "^1.0.0",
+		"systeminformation": "^5.22.3",
+		"ws": "^8.16.0",
+		"zlib": "^1.0.5"
+	}
+}
