@@ -29,21 +29,21 @@ Create a configuration file.
 ```
 
 Start the server.
-```bash
+```sh
 vbackup --start --config /path/to/my/config.json
 ```
 
 Start the server's service daemon.
-```bash
+```sh
 vbackup --start --daemon --config /path/to/my/config.json
 ```
 
 Stop the server's service daemon.
-```bash
+```sh
 vbackup --stop --config /path/to/my/config.json
 ```
 
 Restart the server's service daemon.
-```bash
+```sh
 vbackup --restart --config /path/to/my/config.json
 ```
