@@ -10,7 +10,7 @@
 		"server"
 	],
 	"bin": {
-		"libris": "./cli.js"
+		"vbackup": "./cli.js"
 	},
 	"publishConfig": {
 		"access": "public"

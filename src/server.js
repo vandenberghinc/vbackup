@@ -230,7 +230,7 @@ vbackup.Server = class Server {
 	            user: libos.userInfo().username,
 	            group: null,
 	            command: "vbackup",
-	            args: ["--start", "--config" _config_path.toString()],
+	            args: ["--start", "--config", _config_path.toString()],
 	            env: {},
 	            description: `Service daemon for backup server ${name}.`,
 	            auto_restart: true,
@@ -250,13 +250,14 @@ vbackup.Server = class Server {
 			@type: string, object
 	 */
 	static from_config(path_or_config) {
-		if (typeof path_or_config === "string") {
+		if (typeof path_or_config === "string" || path_or_config instanceof vlib.Path) {
 			path_or_config = new vlib.Path(path_or_config);
 			if (!path_or_config.exists()) {
 				throw new Error(`Path "${path_or_config.str()}" does not exist.`);
 			}
-			path_or_config = JSON.parse(path_or_config.load_sync());
-			path_or_config._config_path = path_or_config.str();
+			const config = JSON.parse(path_or_config.load_sync());
+			config._config_path = path_or_config.str();
+			path_or_config = config;
 		} else if (path_or_config == null || typeof path_or_config !== "object") {
 			throw new Error(`Invalid type for parameter "path", the valid types are "string" or "object"`);
 		}
@@ -269,7 +270,7 @@ vbackup.Server = class Server {
 		@descr: Start the server.
 	 */
 	async start() {
-		this.logger.log(1, "Starting backup server.")
+		this.logger.log(0, "Starting backup server.")
 
 		// Initialize process.
 		this.proc = new vlib.Proc();
@@ -296,6 +297,9 @@ vbackup.Server = class Server {
 			if (target.next_update !== undefined && Date.now() <= target.next_update) {
 				return ;
 			}
+
+			// Logs.
+			this.logger.log(1, `Scanning target "${target.name}".`);
 
 			// New version path.
 			const timestamp = this.scan_timestamp[target.timestamp_start]().sec().toString();
@@ -355,7 +359,7 @@ vbackup.Server = class Server {
 			})
 
 			// Execute.
-		
+			this.logger.log(1, `Synchronizing remote data of target "${target.name}".`);
 			const exit_status = await this.proc.start({
 				command: "rsync",
 				args,
@@ -363,13 +367,13 @@ vbackup.Server = class Server {
 
 			// Process.
 			if (exit_status != 0) {
-				this.logger.error(`Error: Failed to push target "${target.source}": \n    > ${this.proc.err.split("\n").join("\n    > ").slice(0, -7)}`);
+				this.logger.error(`Error: Failed to push target "${target.source}": \n    > ${this.proc.err.trim().split("\n").join("\n    > ").slice(0, -7)}`);
 				return ;
 			}
 
 			// Set as synchronized.
 			target.next_update = Date.now() + target.update_ms;
-			this.logger.log(1, `Synchronized ${target.name}/${timestamp}.`);
+			this.logger.log(0, `Synchronized "${target.name}/${timestamp}".`);
 
 		}
 
@@ -382,25 +386,48 @@ vbackup.Server = class Server {
 
 	// Retrieve size of a target.
 	async _retrieve_remote_size(target) {
+		this.logger.log(1, `Retrieving remote size of target "${target.name}".`);
+
+		// const args = [
+		// 	"-p", this.port,
+		// 	"-i", this.key,
+		// 	"-o", "StrictHostKeyChecking=no",
+		// 	`${this.user}@${this.ip}`,
+		// 	```'calculate_directory_size() {
+		// 	    local directory="$1"
+		// 	    local total_size=0
+		// 	    for item in "$directory"/*; do
+		// 	        if [[ -f "$item" ]]; then
+		// 	            total_size=$((total_size + $(stat -f "%z" "$item")))
+		// 	        elif [[ -d "$item" ]]; then
+		// 	            total_size=$((total_size + $(calculate_directory_size "$item")))
+		// 	        fi
+		// 	    done
+		// 	    echo "$total_size"
+		// 	}
+		// 	calculate_directory_size ${target.source}'
+		// 	```
+		// ];
+		// const exit_status = await this.proc.start({command: "ssh", args});
+		// if (exit_status != 0) {
+		// 	this.logger.error(`Error: Failed to retrieve the remote size of target "${target.source}": ${this.proc.err.trim()}`);
+		// 	return null;
+		// }
+		// const bytes = parseInt(this.proc.out);
+		// if (isNaN(bytes)) {
+		// 	this.logger.error(`Error: Failed to retrieve the remote size of target "${target.source}": Unable to parse number "${this.proc.out}".`);
+		// 	return null;
+		// }
+		// this.logger.log(1, `Size of remote target "${target.name}" is ${bytes / 1024 / 1024 / 1024}GB.`);
+		// return bytes;
+
+
 		const args = [
 			"-p", this.port,
 			"-i", this.key,
 			"-o", "StrictHostKeyChecking=no",
 			`${this.user}@${this.ip}`,
-			```'calculate_directory_size() {
-			    local directory="$1"
-			    local total_size=0
-			    for item in "$directory"/*; do
-			        if [[ -f "$item" ]]; then
-			            total_size=$((total_size + $(stat -f "%z" "$item")))
-			        elif [[ -d "$item" ]]; then
-			            total_size=$((total_size + $(calculate_directory_size "$item")))
-			        fi
-			    done
-			    echo "$total_size"
-			}
-			calculate_directory_size ${target.source}'
-			```
+			`du -sk ${target.source} | awk '{print $1}'`, // in KB.
 		];
 		const exit_status = await this.proc.start({command: "ssh", args});
 		if (exit_status != 0) {
@@ -412,28 +439,8 @@ vbackup.Server = class Server {
 			this.logger.error(`Error: Failed to retrieve the remote size of target "${target.source}": Unable to parse number "${this.proc.out}".`);
 			return null;
 		}
-		return bytes;
-
-
-		// The du method does not give the same bytes as nnodejs does.
-		// const args = [
-		// 	"-p", this.port,
-		// 	"-i", this.key,
-		// 	"-o", "StrictHostKeyChecking=no",
-		// 	`${this.user}@${this.ip}`,
-		// 	`du -sk ${target.source} | awk '{print $1}'`, // in KB.
-		// ];
-		// const exit_status = await this.proc.start({command: "ssh", args});
-		// if (exit_status != 0) {
-		// 	this.logger.error(`Error: Failed to retrieve the remote size of target "${target.source}": ${this.proc.err}`);
-		// 	return null;
-		// }
-		// const bytes = parseInt(this.proc.out);
-		// if (isNaN(bytes)) {
-		// 	this.logger.error(`Error: Failed to retrieve the remote size of target "${target.source}": Unable to parse number "${this.proc.out}".`);
-		// 	return null;
-		// }
-		// return bytes * 1024;
+		this.logger.log(1, `Size of remote target "${target.name}" is ${(bytes / 1024 / 1024).toFixed(2)}GB.`);
+		return bytes * 1024;
 	}
 
 	// Free up space.
@@ -455,16 +462,55 @@ vbackup.Server = class Server {
 			// Create a map of versions mapped by timestamp.
 			let versions = {};
 			await this.targets.iterate_async_await(async (target) => {
+
+				// Retrieve the ".sizes file".
+				const sizes_path = target.destination.join(".sizes");
+				let sizes = {};
+				if (sizes_path.exists()) {
+					sizes = JSON.parse(sizes_path.load_sync());
+				}
+
+				// Retrive the size of all paths when not already cached.
+				const retrieve_sizes = [];
 				const paths = await target.destination.paths();
 				paths.iterate((path) => {
 					const name = path.name();
-					if (isNaN(parseInt(name))) {
-						return null; // non integer file file so not a timestamp.
+					if (name !== ".sizes" && sizes[name] == null && !isNaN(parseInt(name))) {
+						retrieve_sizes.append(path.str());
 					}
-					if (versions[name] === undefined) {
-						versions[name] = [];
+				})
+
+				// Use "du" to retrieve the actual disk use size since nodejs uses the file size.
+				if (retrieve_sizes.length > 0) {
+					const exit_status = await this.proc.start({
+						command: "du",
+						args: ["-sk", ...retrieve_sizes],
+					});
+					if (exit_status != 0) {
+						this.logger.error(`Error: Failed to retrieve the sizes of target "${target.source}": ${this.proc.err}`);
+						return false;
 					}
-					versions[name].append({path, target: target.name, timestamp: name});
+					this.proc.out.split("\n").iterate((line) => {
+						const data = line.split("\t");
+						const name = new vlib.Path(data[1]).name();
+						const bytes = parseInt(data[0]);
+						if (isNaN(bytes)) {
+							this.logger.error(`Error: Failed to retrieve the local size of path "${data[1]}": Unable to parse number "${data[0]}".`);
+						}
+						sizes[name] = bytes * 1024; // convert to bytes.
+					})
+					sizes_path.save_sync(JSON.stringify(sizes));
+				}
+				console.log("sizes:", sizes)
+
+				// Add to versions.
+				Object.keys(sizes).iterate((name) => {
+					versions[name].append({
+						path: target.destination.join(name),
+						target: target.name,
+						timestamp: paresInt(name),
+						size: sizes[name],
+					});
 				})
 			});
 
@@ -476,7 +522,7 @@ vbackup.Server = class Server {
 			let to_remove = [];
 			timestamps.iterate((timestamp) => {
 				return versions[timestamp].iterate((item) => {
-					bytes_left -= item.path.size;
+					bytes_left -= item.size;
 					to_remove.append(item);
 					if (bytes_left <= 0) {
 						return false;
@@ -492,7 +538,7 @@ vbackup.Server = class Server {
 
 			// Remove paths.
 			to_remove.iterate((item) => {
-				this.logger.log(1, `Removing ${item.target}/${item.timestamp}.`);
+				this.logger.log(1, `Removing old backup "${item.target}/${item.timestamp}" to free up space.`);
 				item.path.del_sync({recursive: true})
 			});
 
@@ -502,6 +548,9 @@ vbackup.Server = class Server {
 				this.logger.error(`Error: Failed to remove enough space.`);
 				return false;
 			}
+		}
+		else {
+			this.logger.log(1, `Not removing old backups, still ${(available / 1024 / 1024 / 1024).toFixed(2)}GB available free space.`);
 		}
 
 		// Success.
