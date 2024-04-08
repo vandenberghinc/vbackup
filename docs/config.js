@@ -1,4 +1,4 @@
-{
+module.exports = {
 	"name": "VBackup",
 	"version": "1.1",
 	"icon": {
@@ -21,6 +21,7 @@
     	"tint_base": "rgb(87, 149, 243)"
     },
     "meta": {
+        "author": "Daan van den Bergh",
     	"title": "VBackup",
     	"description": "Create a backup server with ease."
     }

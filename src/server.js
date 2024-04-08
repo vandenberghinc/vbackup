@@ -5,6 +5,15 @@
 
 // ---------------------------------------------------------
 // Server.
+
+vbackup.FullDiskError = class FullDiskError extends Error {
+	constructor(...args) {
+		super(...args);
+	}
+}
+
+// ---------------------------------------------------------
+// Server.
 // @todo should still test if `$ du -sk . | awk '{print $1 / 1024}'` is accurate and works on linux.
 
 /*	@docs:
@@ -15,6 +24,8 @@
 		The synchronizer keeps full snapshots of older backups every time a backup is created. When free disk space is required the oldest snapshots are automatically removed.
 	@warning:
 		The ssh key must be added to ssh agent, otherwise it might cause a ssh prompt hang.
+	@warning:
+		The script should not be executed as user `root` otherwise the incremental backups may not work correctly.
 	@param:
 		@name: name
 		@desc: The name of your backup server for the service daemon.
@@ -79,12 +90,30 @@
 			@name: delete
 			@descr: Remove the deleted files.
 			@type: boolean
-			@default: false
+			@default: true
 		@attr:
 			@name: directory
 			@descr: The target and source paths are directories.
 			@type: boolean
 			@default: true
+	@param:
+		@name: auto_remove
+		@descr:
+			Automatically remove old backups till enough space is freed to back up new targets.
+
+			However, this is not enabled by default because of two reasons.
+			<step>
+				This will remove all backups until there is enough free space to continue.
+				Which could result in the removal of all backups if an (extremely) large new backup needs to be created.
+			</step>
+			<step>
+				The disk space that should be freed is not accurately calculated due to hard links.
+				Therefore, the algorithm uses the full size of the remote target for the bytes that should be available on the backup disk.
+				However, in reality the files that have not changed will not take up any disk space due to the created hard links.
+			</step>
+		@warning: This will remove all backups until there is enough free space to continue.
+		@type: boolean
+		@def: false
 	@param:
 		@name: log_level
 		@descr: The log level.
@@ -103,14 +132,15 @@
 */
 vbackup.Server = class Server {
 	constructor({
-		name,
+		name = "vbackup",
 		ip,
 		port = 22,
 		user,
 		key,
-		destination,		
+		destination,
 		targets,
 		target_source_may_exist = false,
+		auto_remove = false,
 		log_level = 1,
 		log_path = null,
 		error_path = null,
@@ -119,7 +149,7 @@ vbackup.Server = class Server {
 		
 		// Verify args.
         vlib.utils.verify_params({params: arguments[0], check_unknown: true, info: {
-        	name: "string",
+        	name: {type: "string", default: "vbackup"},
             ip: "string",
             port: {type: "number", default: 22},
             user: "string",
@@ -127,6 +157,7 @@ vbackup.Server = class Server {
             destination: "string",
             targets: "array",
             target_source_may_exist: {type: "boolean", default: false},
+            auto_remove: {type: "boolean", default: false},
             log_level: {type: "number", default: 1},
             log_path: {type: "string", default: null},
             error_path: {type: "string", default: null},
@@ -139,6 +170,7 @@ vbackup.Server = class Server {
         this.user = user;
         this.key = key;
         this.destination = new vlib.Path(destination);
+        this.auto_remove = auto_remove;
 
         // Initialize logger.
         this.logger = new vlib.Logger({
@@ -174,7 +206,7 @@ vbackup.Server = class Server {
         			target.directory = true;
         		}
         		if (typeof target.delete !== "boolean") {
-        			target.delete = false;
+        			target.delete = true;
         		}
         		while (target.source.last() === "/") {
         			target.source = target.source.substr(0, target.source.length - 1);
@@ -227,8 +259,9 @@ vbackup.Server = class Server {
         if (_config_path) {
 	        this.daemon = new vlib.Daemon({
 	            name: name,
-	            user: libos.userInfo().username,
-	            group: null,
+	            // user: libos.userInfo().username,
+	            user: "root", // in order to delete some dir such as .Trashes root permission is required.
+	            group: "root",
 	            command: "vbackup",
 	            args: ["--start", "--config", _config_path.toString()],
 	            env: {},
@@ -238,6 +271,14 @@ vbackup.Server = class Server {
 	            errors: error_path instanceof vlib.Path ? error_path.str() : error_path,
 	        })
 	    }
+
+
+        // Prefer /usr/local/bin/rsync over default /usr/bin/rsync, on macos the local is updated through homebrew.
+        if (new vlib.Path("/usr/local/bin/rsync").exists()) {
+        	this.rsync_bin = "/usr/local/bin/rsync";
+        } else {
+        	this.rsync_bin = "rsync";
+        }
 	}
 
 	// Construct from json file.
@@ -282,110 +323,130 @@ vbackup.Server = class Server {
 		}
 	}
 
-	// Scan.
-	async _scan() {
-		this.scan_timestamp = new vlib.Date();
-		await this.targets.iterate_async_await((target) => this._synchronize(target));
-		await vlib.utils.sleep(60 * 1000);
-	}
+	// Restore a backup from a certain timestamp.
+	/*  @docs:
+        @title: Restore backup
+        @description: Restore a backup by target and timestamp.
+        @param:
+            @name: target
+            @type: string
+            @desc: The target of which to restore a backup.
+            @required: true
+        @param:
+            @name: timestamp
+            @type: string, number
+            @desc: The version timestamp in unix seconds of the backup to restore. This can be obtained using the `--list-backups` command.
+            @required: true
+        @param:
+            @name: output
+            @type: string
+            @desc:
+            	The output path where the restored backup will be saved to.
 
-	// Synchronize a target.
-	async _synchronize(target) {
-		try {
+            	When undefined no data will be restored but the path of the target backup will be returned.
+        @return:
+        	When parameter `output` is defined the backup will be copied to the output path and the output path will be returned.
+        	
+        	When parameter `output` is undefined no data will be restored but the path of the target backup will be returned.
+     */
+	async restore_backup(target, timestamp, output = null) {
 
-			// No sync required.
-			if (target.next_update !== undefined && Date.now() <= target.next_update) {
-				return ;
+		// Convert timestamp.
+		if (typeof timestamp !== "number") {
+			const og = timestamp;
+			timestamp = parseInt(timestamp);
+			if (isNaN(timestamp)) {
+				throw new Error(`Invalid timestamp "${og}", the timestamp must be the unix timestamp in seconds.`);
 			}
-
-			// Logs.
-			this.logger.log(1, `Scanning target "${target.name}".`);
-
-			// New version path.
-			const timestamp = this.scan_timestamp[target.timestamp_start]().sec().toString();
-			const new_version = target.destination.join(timestamp);
-
-			// Copy the newest backup to the new location to avoid much network usage and main server cpu usage.
-			const paths = await target.destination.paths();
-			let last_version = null;
-			paths.iterate((path) => {
-				const name = parseInt(path.name());
-				if (!isNaN(name) && last_version == null || name > last_version) {
-					last_version = name;
-				}
-			})
-			if (last_version != null && last_version.toString() != timestamp) {
-				last_version = target.destination.join(last_version.toString());
-
-				// Free up space based on max of local and remote.
-				if (!await this._free_up_space(target, last_version.size)) {
-					this.logger.error(`Error: Skipping backup of target "${target.source}".`);
-					return ;
-				}
-
-				// Copy to new location.
-				last_version.cp_sync(new_version);
-
-			}
-
-			// Free up space based on remote only.
-			else if (!await this._free_up_space(target)) {
-				this.logger.error(`Error: Skipping backup of target "${target.source}".`);
-				return ;
-			}
-
-			// Argumnents.
-			const args = [];
-
-			// Directory.
-			if (target.directory) {
-				args.append("-az");
-			}
-
-			// SSH, source & dest.
-			args.append("-e", `'ssh -p ${this.port} -i ${this.key}'`);
-			args.append(`${this.user}@${this.ip}:${target.source}`);
-			args.append(new_version.str() + "/");
-
-			// Delete.
-			if (target.delete) {
-				args.append("--delete");
-			}
-
-			// Exclude.
-			target.exclude.iterate((i) => {
-				args.append("--exclude");
-				args.append(i);
-			})
-
-			// Execute.
-			this.logger.log(1, `Synchronizing remote data of target "${target.name}".`);
-			const exit_status = await this.proc.start({
-				command: "rsync",
-				args,
-			});
-
-			// Process.
-			if (exit_status != 0) {
-				this.logger.error(`Error: Failed to push target "${target.source}": \n    > ${this.proc.err.trim().split("\n").join("\n    > ").slice(0, -7)}`);
-				return ;
-			}
-
-			// Set as synchronized.
-			target.next_update = Date.now() + target.update_ms;
-			this.logger.log(0, `Synchronized "${target.name}/${timestamp}".`);
-
 		}
 
-		// Catch error.
-		catch (error) {
-			this.logger.error(`Error: Failed to push target "${target.source}": ${error.stack}`);
-			return ;
+		// Fetch target.
+		target = this.fetch_target(target);
+
+		// Check output.
+		if (output != null) {
+			output = new vlib.Path(output);
+			if (output.exists()) {
+				throw new Error(`Output path "${output.str()}" already exists.`);
+			}
 		}
+
+		// Fetch versions.
+		const versions = await this._fetch_target_versions(target);
+		const index = versions.indexOf(timestamp);
+		if (index === -1) {
+			throw new Error(`Unable to find target backup with timestamp "${target.name}@${timestamp}".`);
+		}
+
+		// Copy.
+		const path = target.destination.join(timestamp.toString());
+		if (output == null) {
+			return path;
+		}
+		await path.cp(output);
+		return output;
 	}
 
-	// Retrieve size of a target.
-	async _retrieve_remote_size(target) {
+	// Restore a backup from a certain timestamp.
+	/*  @docs:
+        @title: List backups
+        @description: List the created backups, optionally per target.
+        @param:
+            @name: target
+            @type: null, string
+            @desc: The optional target of which to list the backups.
+        @return:
+        	@descr: This function returns an object with target name's as properties and version numbers as values.
+        	@code:
+        		{
+					mytarget: [1712573157],
+        		}
+     */
+	async list_backups(target = null) {
+		let backups = {};
+		const targets = target == null ? this.targets : [this.fetch_target(target)];
+		await this.targets.iterate_async_await(async (target) => {
+			backups[target.name] = [];
+			const versions = await this._fetch_target_versions(target);
+			versions.iterate(version => {
+				backups[target.name].append(target.destination.join(version));
+			})
+			
+		})
+		return backups;
+	}
+
+	/*  @docs:
+        @title: Fetch target
+        @description: Fetch a target by name.
+        @param:
+            @name: target
+            @type: string
+            @desc: The name of the target to fetch.
+        @return:
+        	This function returns the found target object.
+        	When the target does not exist, an error will be thrown.
+     */
+	fetch_target(target) {
+		if (typeof target === "string") {
+			const name = target;
+			target = this.targets.iterate(target => {
+				if (target.name === target) {
+					return target;
+				}
+			})
+		}
+		if (target == null || typeof target !== "object" || Array.isArray(target)) {
+			throw new Error(`Unable to find target "${name}".`);
+		}
+		return target;
+	}
+
+	// ---------------------------------------------------------
+	// Utils.
+
+	// Fetch size of a target.
+	async _fetch_remote_size(target) {
 		this.logger.log(1, `Retrieving remote size of target "${target.name}".`);
 
 		// const args = [
@@ -427,11 +488,14 @@ vbackup.Server = class Server {
 			"-i", this.key,
 			"-o", "StrictHostKeyChecking=no",
 			`${this.user}@${this.ip}`,
-			`du -sk ${target.source} | awk '{print $1}'`, // in KB.
+			`"du -sk ${target.source} | awk '{print $1}'"`, // in KB.
 		];
+		// this.proc.debug = true;
 		const exit_status = await this.proc.start({command: "ssh", args});
+		// this.proc.debug = false;
+		// console.log("EXIT STATUS", exit_status);
 		if (exit_status != 0) {
-			this.logger.error(`Error: Failed to retrieve the remote size of target "${target.source}": ${this.proc.err}`);
+			this.logger.error(`Error: Failed to retrieve the remote size of target "${target.source}" [${exit_status}]: ${this.proc.err}`);
 			return null;
 		}
 		const bytes = parseInt(this.proc.out);
@@ -443,110 +507,247 @@ vbackup.Server = class Server {
 		return bytes * 1024;
 	}
 
+	// Fetch the last version.
+	async _fetch_last_version(target) {
+		const paths = await target.destination.paths();
+		let last_version = null;
+		paths.iterate((path) => {
+			const name = parseInt(path.name());
+			if (!isNaN(name) && name > last_version) {
+				last_version = name;
+			}
+		})
+		if (last_version != null) {
+			last_version = target.destination.join(last_version.toString());
+		}
+		return last_version;
+	}
+
+	// Fetch target versions.
+	async _fetch_target_versions(target) {
+		const versions = [];
+		const paths = await target.destination.paths();
+		paths.iterate(path => {
+			const name = path.name();
+			if (name !== ".sizes" && !isNaN(parseInt(name))) {
+				versions.append(parseInt(name));
+			}
+		})
+		versions.sort((a, b) => a - b);
+		return versions;
+	}
+
+	// ---------------------------------------------------------
+	// Synchronizing.
+
+	// Scan.
+	async _scan() {
+		this.scan_timestamp = new vlib.Date();
+		await this.targets.iterate_async_await((target) => this._synchronize(target));
+		await vlib.utils.sleep(60 * 1000);
+	}
+
+	// Synchronize a target.
+	async _synchronize(target) {
+		try {
+
+			// No sync required.
+			if (target.next_update !== undefined && Date.now() <= target.next_update) {
+				return ;
+			}
+
+			// Target must be a directory for this mode.
+			if (!target.directory) {
+				return await this._synchronize_full_copy(target);
+			}
+
+			// New version path.
+			const timestamp = this.scan_timestamp[target.timestamp_start]().sec().toString();
+			const new_version = target.destination.join(timestamp);
+
+			// Retrieve the last version.
+			const last_version = await this._fetch_last_version(target)
+			if (last_version != null && last_version.name() === timestamp) {
+				return ;
+			}
+
+			// Logs.
+			this.logger.log(1, `Scanning target "${target.name}".`);
+
+			// Free up space.
+			await this._free_up_space(target);
+
+			// Execute.
+			const sync = async (dry_run = false) => {
+				if (dry_run) {
+					this.logger.log(1, `Synchronizing remote data of target "${target.name}@${timestamp}".`);
+				}
+
+				// Argumnents.
+				const args = [];
+
+				// Flags.
+				args.append("-az");
+
+				// Delete.
+				if (target.delete) {
+					args.append("--delete");
+				}
+
+				// Timeout.
+				args.append("--timeout=600");
+
+				// Exclude.
+				target.exclude.iterate((i) => {
+					args.append("--exclude", `"${i}"`);
+				})
+
+				// SSH.
+				args.append("-e", `'ssh -p ${this.port} -i ${this.key}'`);
+
+				// Link destination.
+				if (last_version != null) {
+					args.append(`--link-dest=../${last_version.name()}`);
+				}
+
+				// Dry run.
+				if (dry_run) {
+					args.appen("--dry-run", "--stats")
+				}
+
+				// Sparse: Reducing disk space usage on the destination by recreating sparse files correctly.
+				args.append('--sparse');
+
+				// Source and dest.
+				args.append(`${this.user}@${this.ip}:${target.source}`);
+				args.append(new_version.str() + "/");
+
+				// Execute.
+				const attempts = 3;
+				for (let attempt = 0; attempt < attempts; attempt++) {
+					const exit_status = await this.proc.start({
+						command: this.rsync_bin,
+						args,
+					});
+
+					// Success.
+					if (exit_status === 0) {
+						return true;
+					}
+
+					// Broken pipe, try again.
+					else if (attempt + 1 < attempts && (this.proc.err != null && this.proc.err.includes("send disconnect: Broken pipe"))) {
+						this.logger.log(0, `Broken pipe while synchronizing "${target.name}@${timestamp}", retrying.`);
+						continue;
+					}
+
+					// Stop.
+					else if (exit_status != 0) {
+						this.logger.error(`Error: Failed to push target "${target.source}" [${exit_status}]: \n    > ${this.proc.err.trim().split("\n").join("\n    > ").slice(0, -7)}`);
+						if (
+							exit_status === 13 || // permission denied
+							exit_status === 23
+						) {
+							this.logger.error("Consider adding these files to the exclude list in order to create a backup of this target.");
+						}
+						return false;
+					}
+				}
+			}
+
+			// Dry run.
+			// let res = await sync(true);
+			// if (!res) { return ; }
+			// else {
+			// 	console.log("OUT:", this.proc.out);
+			// 	process.exit(1);
+			// }
+
+			// Real run.
+			res = await sync();
+			if (!res) { return ; }
+
+
+			// Set as synchronized.
+			target.next_update = Date.now() + target.update_ms;
+			this.logger.log(0, `Synchronized "${target.name}@${timestamp}".`);
+
+		}
+
+		// Catch error.
+		catch (error) {
+			this.logger.error(`Error: Failed to push target "${target.source}": ${error.stack}`);
+			if (error instanceof vbackup.FullDiskError) {
+				throw error;
+			}
+			return ;
+		}
+	}
+
 	// Free up space.
-	async _free_up_space(target, local_bytes = null) {
+	async _free_up_space(target) {
 
 		// Retrieve bytes.
-		let remote_bytes = await this._retrieve_remote_size(target);
+		let remote_bytes = await this._fetch_remote_size(target);
 		if (remote_bytes == null) {
-			return false;
+			this.logger.error(`Error: Failed to retriev the remote size of target "${target.name}".`);
+			return ;
 		}
-		if (local_bytes != null) {
-			remote_bytes = Math.max(local_bytes, remote_bytes);
+
+		// Get available.
+		const available = await this.destination.available_space();
+
+		// Throw error when free up space is disabled.
+		if (!this.auto_remove && remote_bytes > available) {
+			throw new vbackup.FullDiskError(`Disk is full.`);
 		}
 
 		// Check free up.
-		const available = await this.destination.available_space();
 		if (remote_bytes > available) {
 
 			// Create a map of versions mapped by timestamp.
 			let versions = {};
 			await this.targets.iterate_async_await(async (target) => {
-
-				// Retrieve the ".sizes file".
-				const sizes_path = target.destination.join(".sizes");
-				let sizes = {};
-				if (sizes_path.exists()) {
-					sizes = JSON.parse(sizes_path.load_sync());
-				}
-
-				// Retrive the size of all paths when not already cached.
-				const retrieve_sizes = [];
-				const paths = await target.destination.paths();
-				paths.iterate((path) => {
-					const name = path.name();
-					if (name !== ".sizes" && sizes[name] == null && !isNaN(parseInt(name))) {
-						retrieve_sizes.append(path.str());
+				const target_versions = await this._fetch_target_versions(target);
+				target_versions.iterate(timestamp => {
+					const name = timestamp.toString()
+					if (versions[name] == null) {
+						versions[name] = [];
 					}
-				})
-
-				// Use "du" to retrieve the actual disk use size since nodejs uses the file size.
-				if (retrieve_sizes.length > 0) {
-					const exit_status = await this.proc.start({
-						command: "du",
-						args: ["-sk", ...retrieve_sizes],
-					});
-					if (exit_status != 0) {
-						this.logger.error(`Error: Failed to retrieve the sizes of target "${target.source}": ${this.proc.err}`);
-						return false;
-					}
-					this.proc.out.split("\n").iterate((line) => {
-						const data = line.split("\t");
-						const name = new vlib.Path(data[1]).name();
-						const bytes = parseInt(data[0]);
-						if (isNaN(bytes)) {
-							this.logger.error(`Error: Failed to retrieve the local size of path "${data[1]}": Unable to parse number "${data[0]}".`);
-						}
-						sizes[name] = bytes * 1024; // convert to bytes.
-					})
-					sizes_path.save_sync(JSON.stringify(sizes));
-				}
-				console.log("sizes:", sizes)
-
-				// Add to versions.
-				Object.keys(sizes).iterate((name) => {
 					versions[name].append({
-						path: target.destination.join(name),
-						target: target.name,
-						timestamp: paresInt(name),
-						size: sizes[name],
-					});
+						target,
+						timestamp,
+						path: target.destination.join(version.toString()),
+					})
 				})
 			});
 
 			// Sort by timestamps.
 			const timestamps = Object.keys(versions).sort((a, b) => parseInt(a) - parseInt(b));
 
-			// Check what to remove till size is statisfied.
-			let bytes_left = remote_bytes;
-			let to_remove = [];
-			timestamps.iterate((timestamp) => {
-				return versions[timestamp].iterate((item) => {
-					bytes_left -= item.size;
-					to_remove.append(item);
-					if (bytes_left <= 0) {
-						return false;
+			// Iterate timestamps and remove oldest ones.
+			for (let t = 0; t < timestamps.length; t++) {
+				const timestamp = timestamps[t];
+				const version_items = versions[timestamp];
+				for (let i = 0; i < version_items.length; t++) {
+					const items = version_items[i];
+
+					// Remove.
+					this.logger.log(1, `Removing backup ${target.name}@${timestamp} to free up space.`);
+					await item.path.del({recursive: true});
+
+					// Check size again.
+					const available = this.destination.available_space();
+					if (remote_bytes > available) {
+						return ;
 					}
-				})
-			})
-
-			// Check if it is possible to free up space.
-			if (bytes_left > 0) {
-				this.logger.error(`Error: Device is full, unable to free up space for the remote target.`);
-				return false;
+				}
 			}
-
-			// Remove paths.
-			to_remove.iterate((item) => {
-				this.logger.log(1, `Removing old backup "${item.target}/${item.timestamp}" to free up space.`);
-				item.path.del_sync({recursive: true})
-			});
 
 			// Check size again.
 			const available = this.destination.available_space();
 			if (remote_bytes > available) {
-				this.logger.error(`Error: Failed to remove enough space.`);
-				return false;
+				throw new vbackup.FullDiskError(`Disk is full.`);
 			}
 		}
 		else {
@@ -554,8 +755,9 @@ vbackup.Server = class Server {
 		}
 
 		// Success.
-		return true;
+		return ;
 	}
+	
 }
 
 

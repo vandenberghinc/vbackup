@@ -38,29 +38,27 @@ const cli = new vlib.CLI({
          *  @param:
          *      @name: --config
          *      @type: string
-         *      @desc: The path to the configuration file.
-         *      @con_required: true
+         *      @desc: The path to the configuration file. The default configuration file is located at `/etc/vbackup/config`.
          *  @param:
          *      @name: --daemon
          *      @type: boolean
          *      @desc: Flag to start the service daemon.
-         *      @con_required: true
          *  @usage: 
          *      @CLI:
-         *          $ vbackup --start --config path/to/my/config.js
+         *          $ vbackup --start
          */
         {
             id: "--start",
             description: "Start the server (daemon).",
             examples: {
-                "Start": "vbackup --start --config path/to/my/config.js",
+                "Start": "vbackup --start",
             },
             args: [
-                {id: "--config", type: "string", description: `The path to the configuration file.`},
+                {id: "--config", type: "string", required: false, description: `The path to the configuration file. The default configuration file is located at "/etc/vbackup/config".`},
                 {id: "--daemon", type: "boolean", description: `Flag to start the service daemon.`},
             ],
             callback: async ({
-                config = null,
+                config = "/etc/vbackup/config",
                 daemon = false,
             }) => {
                 const server = Server.from_config(config);
@@ -94,20 +92,19 @@ const cli = new vlib.CLI({
          *  @param:
          *      @name: --config
          *      @type: string
-         *      @desc: The path to the configuration file.
-         *      @con_required: true
+         *      @desc: The path to the configuration file. The default configuration file is located at `/etc/vbackup/config`.
          *  @usage: 
          *      @CLI:
-         *          $ vbackup --stop --config path/to/my/config.js
+         *          $ vbackup --stop
          */
         {
             id: "--stop",
             description: "Stop the server service daemon.",
             examples: {
-                "Stop": "vbackup --stop --config path/to/my/config.json",
+                "Stop": "vbackup --stop",
             },
             args: [
-                {id: "--config", type: "string", description: `The path to the configuration file.`},
+                {id: "--config", type: "string", required: false, description: `The path to the configuration file. The default configuration file is located at "/etc/vbackup/config".`},
             ],
             callback: async ({
                 config = null,
@@ -128,27 +125,129 @@ const cli = new vlib.CLI({
          *  @param:
          *      @name: --config
          *      @type: string
-         *      @desc: The path to the configuration file.
-         *      @con_required: true
+         *      @desc: The path to the configuration file. The default configuration file is located at `/etc/vbackup/config`.
          *  @usage: 
          *      @CLI:
-         *          $ vbackup --restart --config path/to/my/config.js
+         *          $ vbackup --restart
          */
         {
             id: "--restart",
             description: "Restart the server service daemon.",
             examples: {
-                "Restart": "vbackup --restart --config path/to/my/config.json",
+                "Restart": "vbackup --restart",
             },
             args: [
-                {id: "--config", type: "string", description: `The path to the configuration file.`},
+                {id: "--config", type: "string", required: false, description: `The path to the configuration file. The default configuration file is located at "/etc/vbackup/config".`},
             ],
             callback: async ({
-                config = null,
+                config = "/etc/vbackup/config",
             }) => {
                 const server = Server.from_config(config);
                 if (!server.daemon) { cli.throw_error("The server service daemon is disabled. Parameter \"--config\" must be passed to define the path to the configuration file."); }
                 await server.daemon.restart()
+            }
+        },
+
+        /*  @docs:
+            @lang: CLI
+            @parent: CLI
+            @title: List backups
+            @name: --list-backups
+            @description: List the created backups, optionally per target.
+            @param:
+                @name: --config
+                @type: string
+                @desc: The path to the configuration file. The default configuration file is located at `/etc/vbackup/config`.
+            @param:
+                @name: --target
+                @type: null, string
+                @desc: The optional target of which to list the backups.
+            @usage: 
+                @CLI:
+                    $ vbackup --list-backups
+         */
+        {
+            id: "--list-backups",
+            description: "List the created backups, optionally per target.",
+            examples: {
+                "List backups": "vbackup --list-backups",
+            },
+            args: [
+                {id: "--config", type: "string", required: false, description: `The path to the configuration file. The default configuration file is located at "/etc/vbackup/config".`},
+                {id: "--target", type: "string", required: false, description: `The optional target of which to list the backups.`},
+            ],
+            callback: async ({
+                config = "/etc/vbackup/config",
+                target = null,
+            }) => {
+                const server = Server.from_config(config);
+                const backups = await server.list_backups(target);
+                let has_backups = false;
+                Object.keys(backups).iterate(key => {
+                    if (backups[key].length > 0) {
+                        has_backups = true;
+                        console.log(`${key}:`);
+                        backups[key].iterate(item => {
+                            console.log(` * ${item}/`);
+                        })
+                    }
+                })
+                if (!has_backups) {
+                    console.log("No backups are created yet.");
+                }
+            }
+        },
+
+        /*  @docs:
+            @lang: CLI
+            @parent: CLI
+            @title: Restore backup
+            @name: --restore-backup
+            @description: Restore a backup by target and timestamp.
+            @param:
+                @name: --config
+                @type: string
+                @desc: The path to the configuration file. The default configuration file is located at `/etc/vbackup/config`.
+            @param:
+                @name: --target
+                @type: string
+                @desc: The target of which to restore a backup.
+                @required: true
+            @param:
+                @name: --timestamp
+                @type: string
+                @desc: The version timestamp in unix seconds of the backup to restore. This can be obtained using the `--list-backups` command.
+                @required: true
+            @param:
+                @name: --output
+                @type: string
+                @desc: The output path where the restored backup will be saved to.
+                @required: true
+            @usage: 
+                @CLI:
+                    $ vbackup --restore-backup --target mytarget --timestamp 1712573157 --output /tmp/mytarget/
+         */
+        {
+            id: "--restore-backup",
+            description: "Restore a backup by target and timestamp.",
+            examples: {
+                "Restore backup": "vbackup --restore-backup --target mytarget --timestamp 1712573157 --output /tmp/mytarget/",
+            },
+            args: [
+                {id: "--config", type: "string", required: false, description: `The path to the configuration file. The default configuration file is located at "/etc/vbackup/config".`},
+                {id: "--target", type: "string", required: true, description: `The target of which to restore a backup.`},
+                {id: "--timestamp", type: "string", required: true, description: `The version timestamp in unix seconds of the backup to restore. This can be obtained using the "--list-backups" command.`},
+                {id: "--output", type: "string", required: true, description: `The output path where the restored backup will be saved to.`},
+            ],
+            callback: async ({
+                config = "/etc/vbackup/config",
+                target = null,
+                timestamp = null,
+                output = null,
+            }) => {
+                const server = Server.from_config(config);
+                await server.restore_backup(target, timestamp, output);
+                console.log(`Successfully restored backup "${target}@${timestamp}" to "${output}".`);
             }
         },
 

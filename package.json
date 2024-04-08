@@ -17,11 +17,11 @@
 	},
 	"author": "Libris",
 	"dependencies": {
-		"bson": "^6.5.0",
+		"bson": "^6.6.0",
 		"diskusage": "^1.2.0",
 		"fs-extra": "^11.2.0",
 		"https": "^1.0.0",
-		"systeminformation": "^5.22.3",
+		"systeminformation": "^5.22.7",
 		"ws": "^8.16.0",
 		"zlib": "^1.0.5"
 	}
