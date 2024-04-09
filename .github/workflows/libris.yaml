@@ -44,7 +44,7 @@ jobs:
         with:
 
           # The relative input path of your configuration file, may either be a JSON or JavaScript file.
-          config: './docs/config.json'
+          config: './docs/config.js'
 
           # The relative output path for the generated documentation file.
           output: './docs/index.html'
