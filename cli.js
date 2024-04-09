@@ -16,7 +16,7 @@ const {vlib, Server} = require("./vbackup.js")
 /*  @docs:
  *  @lang: CLI
  *  @name: CLI
- *  @title: VBackup CLI
+ *  @title: CLI
  *  @description: The vbackup CLI.
  *  @usage: 
  *      @CLI:

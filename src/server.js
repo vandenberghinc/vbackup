@@ -635,7 +635,13 @@ vbackup.Server = class Server {
 						return true;
 					}
 
-					// Broken pipe, try again.
+					// Retry: exit status 10 is also thrown on a connection error.
+					else if (attempt + 1 < attempts && exit_status === 10) {
+						this.logger.log(0, `Connection error while synchronizing "${target.name}@${timestamp}", retrying.`);
+						continue;
+					}
+
+					// Retry: broken pipe.
 					else if (attempt + 1 < attempts && (this.proc.err != null && this.proc.err.includes("send disconnect: Broken pipe"))) {
 						this.logger.log(0, `Broken pipe while synchronizing "${target.name}@${timestamp}", retrying.`);
 						continue;
@@ -653,6 +659,7 @@ vbackup.Server = class Server {
 						return false;
 					}
 				}
+				return false;
 			}
 
 			// Dry run.
@@ -664,9 +671,8 @@ vbackup.Server = class Server {
 			// }
 
 			// Real run.
-			res = await sync();
+			const res = await sync();
 			if (!res) { return ; }
-
 
 			// Set as synchronized.
 			target.next_update = Date.now() + target.update_ms;
@@ -676,7 +682,7 @@ vbackup.Server = class Server {
 
 		// Catch error.
 		catch (error) {
-			this.logger.error(`Error: Failed to push target "${target.source}": ${error.stack}`);
+			this.logger.error(`Error: Failed to push target "${target.name}": ${error.stack}`);
 			if (error instanceof vbackup.FullDiskError) {
 				throw error;
 			}

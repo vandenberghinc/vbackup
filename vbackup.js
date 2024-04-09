@@ -4215,6 +4215,10 @@ args,
 if(exit_status===0){
 return true;
 }
+else if(attempt+1<attempts&&exit_status===10){
+this.logger.log(0,`Connection error while synchronizing "${target.name}@${timestamp}", retrying.`);
+continue;
+}
 else if(attempt+1<attempts&&(this.proc.err!=null&&this.proc.err.includes("send disconnect: Broken pipe"))){
 this.logger.log(0,`Broken pipe while synchronizing "${target.name}@${timestamp}", retrying.`);
 continue;
@@ -4230,14 +4234,15 @@ this.logger.error("Consider adding these files to the exclude list in order to c
 return false;
 }
 }
+return false;
 }
-res=await sync();
+const res=await sync();
 if(!res){return ;}
 target.next_update=Date.now()+target.update_ms;
 this.logger.log(0,`Synchronized "${target.name}@${timestamp}".`);
 }
 catch(error){
-this.logger.error(`Error: Failed to push target "${target.source}": ${error.stack}`);
+this.logger.error(`Error: Failed to push target "${target.name}": ${error.stack}`);
 if(error instanceof vbackup.FullDiskError){
 throw error;
 }
